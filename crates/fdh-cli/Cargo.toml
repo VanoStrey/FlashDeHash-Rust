@@ -1,0 +1,14 @@
+[package]
+name = "fdh-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "fdh"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+fdh-bot.workspace = true
+fdh-core.workspace = true
+rayon.workspace = true

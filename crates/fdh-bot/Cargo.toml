@@ -1,0 +1,11 @@
+[package]
+name = "fdh-bot"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fdh-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true

@@ -1,0 +1,5 @@
+/target
+*.fdh
+bot_config.json
+dictionaries.conf
+.DS_Store

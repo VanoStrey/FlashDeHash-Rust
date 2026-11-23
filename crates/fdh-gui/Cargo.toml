@@ -1,0 +1,13 @@
+[package]
+name = "fdh-gui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "fdh-gui"
+path = "src/main.rs"
+
+[dependencies]
+eframe.workspace = true
+fdh-core.workspace = true
+rfd.workspace = true
