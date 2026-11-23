@@ -24,7 +24,7 @@ pub struct SearchHit {
 }
 
 enum WindowSearchOutcome {
-    Found { pos: usize },
+    Found { pos: usize, elem: u32 },
     MissLeft,
     MissRight,
     NotPresent,
@@ -108,11 +108,12 @@ impl DictionarySearcher {
                 return None;
             }
             let chunk_index = header.start_chunk_index + slot;
-            let chunk_data = self.dict.chunk_slice(slot);
+            let chunk_offset =
+                header.data_offset + (slot as u64) * (header.chunk_byte_len() as u64);
             let mut buf = [0u8; 256];
 
             match self.search_window(
-                chunk_data,
+                chunk_offset,
                 chunk_index,
                 chunk_bits,
                 elem_size,
@@ -121,9 +122,8 @@ impl DictionarySearcher {
                 target,
                 &mut buf,
             ) {
-                WindowSearchOutcome::Found { pos } => {
+                WindowSearchOutcome::Found { pos, elem } => {
                     found.store(true, AtomicOrdering::Relaxed);
-                    let elem = read_elem(chunk_data, pos, elem_size);
                     let s = self.decode_elem_string(chunk_index, elem, chunk_bits, &mut buf);
                     Some((s, chunk_index, pos, false))
                 }
@@ -131,8 +131,8 @@ impl DictionarySearcher {
                     if found.load(AtomicOrdering::Relaxed) {
                         return None;
                     }
-                    if let Some(pos) = self.binary_search_exact(
-                        chunk_data,
+                    if let Some((pos, elem)) = self.binary_search_exact(
+                        chunk_offset,
                         chunk_index,
                         chunk_bits,
                         elem_size,
@@ -142,7 +142,6 @@ impl DictionarySearcher {
                         &mut buf,
                     ) {
                         found.store(true, AtomicOrdering::Relaxed);
-                        let elem = read_elem(chunk_data, pos, elem_size);
                         let s = self.decode_elem_string(chunk_index, elem, chunk_bits, &mut buf);
                         Some((s, chunk_index, pos, true))
                     } else {
@@ -153,8 +152,8 @@ impl DictionarySearcher {
                     if found.load(AtomicOrdering::Relaxed) {
                         return None;
                     }
-                    if let Some(pos) = self.binary_search_exact(
-                        chunk_data,
+                    if let Some((pos, elem)) = self.binary_search_exact(
+                        chunk_offset,
                         chunk_index,
                         chunk_bits,
                         elem_size,
@@ -164,7 +163,6 @@ impl DictionarySearcher {
                         &mut buf,
                     ) {
                         found.store(true, AtomicOrdering::Relaxed);
-                        let elem = read_elem(chunk_data, pos, elem_size);
                         let s = self.decode_elem_string(chunk_index, elem, chunk_bits, &mut buf);
                         Some((s, chunk_index, pos, true))
                     } else {
@@ -188,7 +186,7 @@ impl DictionarySearcher {
     #[inline]
     fn search_window(
         &self,
-        chunk_data: &[u8],
+        chunk_offset: u64,
         chunk_index: u32,
         chunk_bits: u8,
         elem_size: usize,
@@ -204,7 +202,9 @@ impl DictionarySearcher {
 
         while lo <= hi {
             let mid = lo + ((hi - lo) >> 1);
-            let elem = read_elem(chunk_data, mid, elem_size);
+            let Some(elem) = self.read_elem_at(chunk_offset, mid, elem_size) else {
+                return WindowSearchOutcome::NotPresent;
+            };
             let encoded = self
                 .encoding
                 .encode_chunk_elem(chunk_index, elem, chunk_bits, buf);
@@ -222,7 +222,7 @@ impl DictionarySearcher {
                     }
                     hi = mid - 1;
                 }
-                Ordering::Equal => return WindowSearchOutcome::Found { pos: mid },
+                Ordering::Equal => return WindowSearchOutcome::Found { pos: mid, elem },
             }
         }
 
@@ -238,7 +238,7 @@ impl DictionarySearcher {
     #[allow(clippy::too_many_arguments)]
     fn binary_search_exact(
         &self,
-        chunk_data: &[u8],
+        chunk_offset: u64,
         chunk_index: u32,
         chunk_bits: u8,
         elem_size: usize,
@@ -246,10 +246,10 @@ impl DictionarySearcher {
         mut hi: usize,
         target: &HashDigest,
         buf: &mut [u8; 256],
-    ) -> Option<usize> {
+    ) -> Option<(usize, u32)> {
         while lo <= hi {
             let mid = lo + ((hi - lo) >> 1);
-            let elem = read_elem(chunk_data, mid, elem_size);
+            let elem = self.read_elem_at(chunk_offset, mid, elem_size)?;
             let encoded = self
                 .encoding
                 .encode_chunk_elem(chunk_index, elem, chunk_bits, buf);
@@ -263,10 +263,28 @@ impl DictionarySearcher {
                     }
                     hi = mid - 1;
                 }
-                Ordering::Equal => return Some(mid),
+                Ordering::Equal => return Some((mid, elem)),
             }
         }
         None
+    }
+
+    #[inline]
+    fn read_elem_at(&self, chunk_offset: u64, index: usize, elem_size: usize) -> Option<u32> {
+        let mut raw = [0u8; 4];
+        let off = chunk_offset + (index * elem_size) as u64;
+        self.dict.read_exact_at(off, &mut raw[..elem_size]).ok()?;
+        Some(match elem_size {
+            3 => ((raw[0] as u32) << 16) | ((raw[1] as u32) << 8) | (raw[2] as u32),
+            4 => u32::from_be_bytes(raw),
+            _ => {
+                let mut val = 0u32;
+                for &b in &raw[..elem_size] {
+                    val = (val << 8) | (b as u32);
+                }
+                val
+            }
+        })
     }
 
     fn decode_elem_string(

@@ -208,10 +208,13 @@ impl FdhHeader {
     }
 }
 
-/// Read-only memory-mapped handle to a single-file `.fdh` dictionary.
+/// Read-only handle to a single-file `.fdh` dictionary.
+/// Holds both a lock-free `File` handle (for `pread` random probes without `mmap` VM lock
+/// or speculative readahead on external drives) and a `MADV_RANDOM` memory map for bulk access.
 pub struct FdhDictionary {
     path: PathBuf,
     header: FdhHeader,
+    file: File,
     mmap: Mmap,
 }
 
@@ -232,8 +235,51 @@ impl FdhDictionary {
         // SAFETY: The dictionary file is opened read-only for search. External concurrent
         // truncation is outside our contract; callers must not mutate a file while searching it.
         let mmap = unsafe { Mmap::map(&file)? };
+        #[cfg(unix)]
+        {
+            let _ = mmap.advise(memmap2::Advice::Random);
+        }
 
-        Ok(Self { path, header, mmap })
+        Ok(Self {
+            path,
+            header,
+            file,
+            mmap,
+        })
+    }
+
+    /// Lock-free positional read (`pread` on Unix, `seek_read` on Windows).
+    /// Avoids macOS `mmap` speculative readahead and global VM page-fault lock contention.
+    #[inline]
+    pub fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            self.file.read_exact_at(buf, offset)?;
+            Ok(())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileExt;
+            let mut filled = 0;
+            while filled < buf.len() {
+                let n = self.file.seek_read(&mut buf[filled..], offset + filled as u64)?;
+                if n == 0 {
+                    return Err(FdhError::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "unexpected EOF during seek_read",
+                    )));
+                }
+                filled += n;
+            }
+            Ok(())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let start = offset as usize;
+            buf.copy_from_slice(&self.mmap[start..start + buf.len()]);
+            Ok(())
+        }
     }
 
     #[inline]
